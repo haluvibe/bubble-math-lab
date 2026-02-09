@@ -6,33 +6,40 @@ import { useState, useEffect, useCallback, useRef } from 'react';
   A vertical scrolling shooter where your weapons are math operations.
   Blast enemies to transform your Power Number, then match boss shields!
 
-  World 1-2: Addition (+) and Subtraction (−)
+  Weapons: Addition (+), Subtraction (−), Multiplication (×), Division (÷)
 
   Controls:
   - Arrow Keys / WASD: Move ship
   - Space / Z: Shoot
-  - 1/2: Switch weapon (+, −)
+  - 1/2/3/4: Switch weapon (+, −, ×, ÷)
   - Q/E: Cycle weapons
   - Mouse: Move + Click to shoot
 */
 
 // =============== CONSTANTS ===============
-const SHIP_SPEED = 5;
-const SHOOT_COOLDOWNS = [130, 200];
+const SHIP_SPEED = 7.5;
+const SHOOT_COOLDOWNS = [130, 200, 250, 300];
 const MAX_POWER = 99;
-const MIN_POWER = 1;
+const MIN_POWER = 0;
 
 const WEAPONS = [
   { id: 'add', symbol: '+', name: 'ADD', color: '#4ade80', glow: 'rgba(74,222,128,0.5)', bulletSpeed: 9, shotStyle: 'rapid' },
   { id: 'sub', symbol: '−', name: 'SUB', color: '#fb923c', glow: 'rgba(251,146,60,0.5)', bulletSpeed: 7, shotStyle: 'homing' },
+  { id: 'mul', symbol: '×', name: 'MUL', color: '#a78bfa', glow: 'rgba(167,139,250,0.5)', bulletSpeed: 6, shotStyle: 'heavy' },
+  { id: 'div', symbol: '÷', name: 'DIV', color: '#38bdf8', glow: 'rgba(56,189,248,0.5)', bulletSpeed: 8, shotStyle: 'pierce' },
 ];
 
-// Boss configs per world
-const WORLD_BOSSES = [
-  { hp: 2, targets: [5, 8] },
-  { hp: 3, targets: [8, 10, 6] },
-  { hp: 5, targets: [12, 15, 7, 20, 10] },
-];
+// Generate random boss targets based on world index
+function generateBossTargets(worldIdx) {
+  const hp = 2 + Math.floor(worldIdx / 2);
+  const minTarget = worldIdx <= 2 ? 2 + worldIdx : Math.floor(3 + worldIdx * 3);
+  const maxTarget = worldIdx <= 2 ? 5 + worldIdx * 3 : Math.floor(10 + worldIdx * worldIdx * 1.5);
+  const targets = [];
+  for (let i = 0; i < hp; i++) {
+    targets.push(randInt(minTarget, Math.min(maxTarget, MAX_POWER)));
+  }
+  return { hp, targets };
+}
 
 // Continuous spawn: random interval between 0.1s and 2.0s (~6–120 frames at 60fps)
 const SPAWN_INTERVAL_MIN = 6;
@@ -51,10 +58,29 @@ const randInt = (lo, hi) => Math.floor(rand(lo, hi + 1));
 function applyOp(power, opIndex, value) {
   if (opIndex === 0) return clamp(power + value, MIN_POWER, MAX_POWER);
   if (opIndex === 1) return clamp(power - value, MIN_POWER, MAX_POWER);
+  if (opIndex === 2) return clamp(power * value, MIN_POWER, MAX_POWER);
+  if (opIndex === 3) return value === 0 ? power : clamp(Math.floor(power / value), MIN_POWER, MAX_POWER);
   return power;
 }
 
-function opSymbol(i) { return ['+', '\u2212'][i] || '?'; }
+function opSymbol(i) { return ['+', '\u2212', '\u00d7', '\u00f7'][i] || '?'; }
+
+function isPrime(n) {
+  if (n < 2) return false;
+  if (n < 4) return true;
+  if (n % 2 === 0 || n % 3 === 0) return false;
+  for (let i = 5; i * i <= n; i += 6) {
+    if (n % i === 0 || n % (i + 2) === 0) return false;
+  }
+  return true;
+}
+
+const PICKUP_TYPES = [
+  { id: 'heart', symbol: '\u2665', label: '+1 LIFE', color: '#ef4444' },
+  { id: 'shield', symbol: '\u25c6', label: 'SHIELD!', color: '#38bdf8' },
+  { id: 'prime', symbol: '\u26a1', label: 'PRIME SURGE!', color: '#ffd700' },
+];
+const COMBO_PICKUP_INTERVAL = 5; // drop a pickup every N combo hits
 
 // =============== MAIN COMPONENT ===============
 export default function MathStorm() {
@@ -69,9 +95,10 @@ export default function MathStorm() {
 
   // HUD state (updated periodically from game loop)
   const [hud, setHud] = useState({
-    score: 0, lives: 3, power: 1, weapon: 0,
+    score: 0, lives: 3, power: 0, weapon: 0,
     world: 1, combo: 0, bossHP: 0, bossMaxHP: 0,
     bossTarget: 0, bossActive: false, powerMatch: false,
+    shieldActive: false, primeActive: false, isPrime: false,
     msg: '', msgTimer: 0,
   });
 
@@ -85,40 +112,58 @@ export default function MathStorm() {
     cvs.width = W;
     cvs.height = H;
 
-    // Starfield
+    // Starfield with nebula patches
     const stars = [];
     for (let layer = 0; layer < 3; layer++) {
-      for (let i = 0; i < 35; i++) {
+      for (let i = 0; i < 40; i++) {
         stars.push({
           x: Math.random() * W, y: Math.random() * H,
           speed: (layer + 1) * 0.4,
           size: 0.4 + layer * 0.6,
-          bright: 0.15 + layer * 0.25,
+          bright: 0.12 + layer * 0.22,
+          flare: layer === 2 && Math.random() < 0.15, // some bright stars get lens flares
+          hue: Math.random() < 0.3 ? 200 + Math.random() * 40 : 0, // some blue-tinted
         });
       }
+    }
+    // Nebula patches — slow-drifting colored fog
+    const nebulae = [];
+    for (let i = 0; i < 4; i++) {
+      nebulae.push({
+        x: Math.random() * W, y: Math.random() * H,
+        r: 80 + Math.random() * 120,
+        hue: [220, 280, 340, 200][i],
+        speed: 0.08 + Math.random() * 0.12,
+        alpha: 0.025 + Math.random() * 0.02,
+      });
     }
 
     _idCounter = 0;
 
     gRef.current = {
-      W, H, stars,
+      W, H, stars, nebulae,
       ship: { x: W / 2, y: H - 90, invTimer: 0, flashTimer: 0 },
       bullets: [],
       enemies: [],
       eBullets: [],
       particles: [],
       texts: [],
-      score: 0, lives: 3, power: 1, weapon: 0,
+      score: 0, lives: 3, power: 0, weapon: 0,
       worldIdx: 0,
       spawnCooldown: 60, enemiesSpawned: 0, nextBossAt: ENEMIES_PER_BOSS,
       shootTimer: 0, combo: 0, comboTimer: 0,
       boss: null,
+      pickups: [],
+      shieldTimer: 0, primeTimer: 0,
+      lastComboPickup: 0, // tracks combo count at last pickup drop
       shake: 0, slowmo: 0,
       time: 0, hudTick: 0,
+      // World transition: null | { phase: 'flyOut'|'pause'|'flyIn', timer: number }
+      transition: null,
     };
 
     setHud({
-      score: 0, lives: 3, power: 1, weapon: 0,
+      score: 0, lives: 3, power: 0, weapon: 0,
       world: 1, combo: 0, bossHP: 0, bossMaxHP: 0,
       bossTarget: 0, bossActive: false, powerMatch: false,
       msg: 'GET READY!', msgTimer: 80,
@@ -126,26 +171,53 @@ export default function MathStorm() {
   }, []);
 
   // ========== SPAWN SINGLE ENEMY ==========
+  function generateWaypoints(g, world) {
+    const W = g.W, H = g.H;
+    const startX = rand(40, W - 40);
+    const steer = Math.min(0.5 + world * 0.15, 2.5); // turning intensity scales with world
+    const pts = [];
+    const numPts = 2 + Math.min(world, 5); // more waypoints = more complex paths
+
+    for (let i = 0; i < numPts; i++) {
+      pts.push({
+        x: rand(40, W - 40),
+        y: 60 + ((i + 1) / (numPts + 1)) * (H - 100),
+      });
+    }
+    // Final exit point off screen
+    pts.push({ x: rand(40, W - 40), y: H + 60 });
+    return { startX, pts, steer };
+  }
+
   function spawnEnemy(g) {
-    const diff = Math.min(g.enemiesSpawned / 20, 8);
+    const diff = Math.min(g.enemiesSpawned / 30, 10);
+    const world = g.worldIdx;
     const minVal = 1;
-    const maxVal = Math.min(3 + Math.floor(diff), 9);
+    const maxVal = Math.min(2 + Math.floor(diff * 0.8), 9);
     const val = randInt(minVal, maxVal);
-    const speed = 1.2 + diff * 0.06;
+    const spd = Math.min(1.8 + diff * 0.12, 4.5);
     const shootRate = Math.max(80, 250 - diff * 15);
-    const moveTypes = ['line', 'zigzag', 'stream', 'v'];
+
+    // Generate smooth waypoint path
+    const wp = generateWaypoints(g, world);
+    // Entry angle: early worlds = straight down, later = from sides
+    let startX = wp.startX, startY = -35;
+    const entryStyle = world <= 1 ? 0 : randInt(0, Math.min(world, 3));
+    if (entryStyle === 1) { startX = -20; startY = rand(60, g.H * 0.3); } // from left
+    else if (entryStyle === 2) { startX = g.W + 20; startY = rand(60, g.H * 0.3); } // from right
+    else if (entryStyle === 3) { startX = rand(40, g.W - 40); startY = -35; } // diagonal entry
 
     g.enemies.push({
       id: nextId(),
-      x: rand(50, g.W - 50),
-      y: -35,
+      x: startX, y: startY,
+      vx: 0, vy: spd,
       value: val,
       hp: val > 7 ? 2 : 1,
       maxHP: val > 7 ? 2 : 1,
-      speed: speed + Math.random() * 0.3,
+      baseSpeed: spd,
       w: 34, h: 34, hitFlash: 0,
-      moveType: moveTypes[randInt(0, 3)],
-      moveT: Math.random() * Math.PI * 2,
+      waypoints: wp.pts, wpIdx: 0,
+      steer: wp.steer,
       shootTimer: 80 + Math.random() * shootRate,
       shootRate: shootRate,
     });
@@ -181,10 +253,59 @@ export default function MathStorm() {
     if (g.shake > 0) { g.shake *= 0.88; if (g.shake < 0.3) g.shake = 0; }
     if (g.comboTimer > 0) { g.comboTimer -= dt; if (g.comboTimer <= 0) g.combo = 0; }
 
-    // ---- ship ----
     const k = keysRef.current;
     const m = mouseRef.current;
     const s = g.ship;
+
+    // ---- world transition ----
+    if (g.transition) {
+      const tr = g.transition;
+      tr.timer -= dt;
+
+      if (tr.phase === 'flyOut') {
+        // Ship centers and accelerates upward off screen
+        s.x += (g.W / 2 - s.x) * 0.05 * dt;
+        s.y -= 7 * dt;
+        // Clear remaining enemies and bullets off screen
+        g.enemies = g.enemies.filter(e => { e.y += 8 * dt; return e.y < g.H + 60; });
+        g.eBullets = [];
+        g.bullets = [];
+        if (s.y < -60) {
+          tr.phase = 'pause';
+          tr.timer = 40;
+          g.enemies = [];
+          g.particles = [];
+        }
+      } else if (tr.phase === 'pause') {
+        // Brief pause — clear screen, reset power
+        g.power = 0;
+        if (tr.timer <= 0) {
+          tr.phase = 'flyIn';
+          tr.timer = 60;
+          s.x = g.W / 2;
+          s.y = g.H + 60;
+          s.invTimer = 120;
+          s.flashTimer = 0;
+          // Advance world and set up next boss threshold
+          g.worldIdx++;
+          g.nextBossAt = g.enemiesSpawned + ENEMIES_PER_BOSS;
+          g.texts.push({ x: g.W / 2, y: g.H / 2 - 20, text: `WORLD ${g.worldIdx + 1}`, color: '#ffd700', life: 100, maxL: 100, vy: 0, sz: 48 });
+        }
+      } else if (tr.phase === 'flyIn') {
+        // Ship flies in from the bottom to starting position
+        const targetY = g.H - 90;
+        s.y += (targetY - s.y) * 0.06 * dt;
+        if (tr.timer <= 0 && Math.abs(s.y - targetY) < 5) {
+          s.y = targetY;
+          g.transition = null;
+          g.spawnCooldown = 30;
+        }
+      }
+
+      // Stars still scroll during transition (handled below)
+      // Skip all normal gameplay
+    } else {
+    // ---- ship ----
     let dx = 0, dy = 0;
     if (k['ArrowLeft'] || k['a'] || k['A']) dx -= 1;
     if (k['ArrowRight'] || k['d'] || k['D']) dx += 1;
@@ -203,6 +324,8 @@ export default function MathStorm() {
     // ---- weapon switch ----
     if (k['1']) g.weapon = 0;
     if (k['2']) g.weapon = 1;
+    if (k['3']) g.weapon = 2;
+    if (k['4']) g.weapon = 3;
     if (k['q'] || k['Q']) { k['q'] = k['Q'] = false; g.weapon = (g.weapon + WEAPONS.length - 1) % WEAPONS.length; }
     if (k['e'] || k['E']) { k['e'] = k['E'] = false; g.weapon = (g.weapon + 1) % WEAPONS.length; }
 
@@ -213,10 +336,18 @@ export default function MathStorm() {
       g.shootTimer = SHOOT_COOLDOWNS[g.weapon];
       const w = WEAPONS[g.weapon];
       if (g.weapon === 0) {
+        // ADD: rapid single shots
         g.bullets.push({ id: nextId(), x: s.x, y: s.y - 22, vx: 0, vy: -w.bulletSpeed, wep: 0, sz: 4, alive: true });
-      } else {
+      } else if (g.weapon === 1) {
+        // SUB: twin homing shots
         g.bullets.push({ id: nextId(), x: s.x - 8, y: s.y - 16, vx: -0.6, vy: -w.bulletSpeed, wep: 1, sz: 5, alive: true, homing: true });
         g.bullets.push({ id: nextId(), x: s.x + 8, y: s.y - 16, vx: 0.6, vy: -w.bulletSpeed, wep: 1, sz: 5, alive: true, homing: true });
+      } else if (g.weapon === 2) {
+        // MUL: heavy shot that splits into a burst after short travel
+        g.bullets.push({ id: nextId(), x: s.x, y: s.y - 22, vx: 0, vy: -w.bulletSpeed, wep: 2, sz: 8, alive: true, splitTimer: 18 });
+      } else if (g.weapon === 3) {
+        // DIV: fast piercing shot that passes through enemies
+        g.bullets.push({ id: nextId(), x: s.x, y: s.y - 22, vx: 0, vy: -w.bulletSpeed, wep: 3, sz: 3, alive: true, pierce: true, hitIds: [] });
       }
     }
 
@@ -238,6 +369,23 @@ export default function MathStorm() {
           }
         }
       }
+      // MUL: split into burst ring after timer expires
+      if (b.splitTimer !== undefined) {
+        b.splitTimer -= dt;
+        if (b.splitTimer <= 0) {
+          const count = 6;
+          for (let i = 0; i < count; i++) {
+            const a = (i / count) * Math.PI * 2 + rand(-0.15, 0.15);
+            const spd = WEAPONS[2].bulletSpeed * 0.9;
+            g.bullets.push({ id: nextId(), x: b.x, y: b.y, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd - 2, wep: 2, sz: 4, alive: true, child: true });
+          }
+          // Spark effect at split point
+          for (let p = 0; p < 8; p++) {
+            g.particles.push({ x: b.x, y: b.y, vx: rand(-4, 4), vy: rand(-4, 4), life: 12 + Math.random() * 8, maxL: 20, color: WEAPONS[2].color, sz: 2 + Math.random() * 3 });
+          }
+          b.alive = false;
+        }
+      }
       b.x += b.vx * dt;
       b.y += b.vy * dt;
       return b.x > -30 && b.x < g.W + 30 && b.y > -30 && b.y < g.H + 30;
@@ -246,34 +394,57 @@ export default function MathStorm() {
     // ---- continuous enemy spawning ----
     g.spawnCooldown -= dt;
     if (g.spawnCooldown <= 0) {
-      g.spawnCooldown = rand(SPAWN_INTERVAL_MIN, SPAWN_INTERVAL_MAX);
+      const diff = Math.min(g.enemiesSpawned / 30, 10);
+      const minInterval = Math.max(SPAWN_INTERVAL_MIN, 60 - diff * 6);
+      g.spawnCooldown = rand(minInterval, SPAWN_INTERVAL_MAX);
       spawnEnemy(g);
 
-      // Spawn boss after enough enemies, if no boss active
+      // Spawn boss after 3 enemies, if no boss active
       if (g.enemiesSpawned >= g.nextBossAt && !g.boss) {
-        const bossIdx = g.worldIdx % WORLD_BOSSES.length;
-        const bossCfg = WORLD_BOSSES[bossIdx];
-        const loopCount = Math.floor(g.worldIdx / WORLD_BOSSES.length);
-        const hp = bossCfg.hp + loopCount * 2;
+        const bossCfg = generateBossTargets(g.worldIdx);
+        const bulletCount = g.worldIdx + 1; // +1 bullet per world
+        const fireRate = Math.max(40, 120 - g.worldIdx * 8);
+        const bulletSpeed = Math.min(2.0 + g.worldIdx * 0.25, 4.5);
         g.boss = {
           x: g.W / 2, y: -100, targetY: 110,
-          w: 130, h: 90, hp, maxHP: hp,
-          targets: [...bossCfg.targets], targetIdx: 0,
+          w: 130, h: 90, hp: bossCfg.hp, maxHP: bossCfg.hp,
+          targets: bossCfg.targets, targetIdx: 0,
           target: bossCfg.targets[0],
+          bulletCount, fireRate, bulletSpeed,
           phase: 'enter', shootTimer: 120, hitFlash: 0, angle: 0,
+          patternAngle: 0,
         };
         g.texts.push({ x: g.W / 2, y: g.H / 2 - 50, text: `WORLD ${g.worldIdx + 1}`, color: '#ffd700', life: 120, maxL: 120, vy: 0, sz: 48 });
         g.texts.push({ x: g.W / 2, y: g.H / 2 + 10, text: `Boss Shield: ${bossCfg.targets[0]}`, color: '#ef4444', life: 100, maxL: 100, vy: 0, sz: 22 });
       }
     }
+    } // end normal gameplay (not in transition)
 
+    if (!g.transition) {
     // ---- enemies ----
     g.enemies = g.enemies.filter(e => {
-      e.moveT += dt * 0.05;
-      e.y += e.speed * dt;
-      if (e.moveType === 'v' || e.moveType === 'zigzag') e.x += Math.sin(e.moveT * 3) * 1.8 * dt;
-      if (e.moveType === 'stream') e.x += Math.cos(e.moveT * 2) * 2.2 * dt;
-      e.x = clamp(e.x, 20, g.W - 20);
+      // Smooth waypoint steering (like 1942/Raptor)
+      if (e.waypoints && e.wpIdx < e.waypoints.length) {
+        const wp = e.waypoints[e.wpIdx];
+        const dx = wp.x - e.x;
+        const dy = wp.y - e.y;
+        const d = Math.hypot(dx, dy);
+        if (d < 20) {
+          e.wpIdx++; // reached waypoint, steer toward next
+        } else {
+          // Smoothly steer velocity toward waypoint
+          const targetAngle = Math.atan2(dy, dx);
+          const curAngle = Math.atan2(e.vy, e.vx);
+          let diff = targetAngle - curAngle;
+          while (diff > Math.PI) diff -= Math.PI * 2;
+          while (diff < -Math.PI) diff += Math.PI * 2;
+          const newAngle = curAngle + diff * e.steer * 0.05 * dt;
+          e.vx = Math.cos(newAngle) * e.baseSpeed;
+          e.vy = Math.sin(newAngle) * e.baseSpeed;
+        }
+      }
+      e.x += e.vx * dt;
+      e.y += e.vy * dt;
 
       // e.shootTimer -= dt;
       // if (e.shootTimer <= 0 && e.y > 60 && e.y < g.H - 180 && e.shootRate > 0) {
@@ -282,25 +453,65 @@ export default function MathStorm() {
       //   g.eBullets.push({ id: nextId(), x: e.x, y: e.y, vx: Math.cos(a) * 2.8, vy: Math.sin(a) * 2.8, sz: 4 });
       // }
       if (e.hitFlash > 0) e.hitFlash -= dt;
-      return e.y < g.H + 50;
+      return e.y < g.H + 60 && e.y > -60 && e.x > -60 && e.x < g.W + 60;
     });
 
     // ---- boss ----
     if (g.boss) {
       const b = g.boss;
-      b.angle += dt * 0.02;
       if (b.phase === 'enter') {
         b.y += (b.targetY - b.y) * 0.04 * dt;
         if (Math.abs(b.y - b.targetY) < 3) { b.y = b.targetY; b.phase = 'fight'; }
       } else if (b.phase === 'fight') {
-        b.x = g.W / 2 + Math.sin(b.angle) * (g.W * 0.25);
+        b.angle += dt * 0.02;
+        // Movement complexity scales with world
+        const w = g.worldIdx;
+        const cx = g.W / 2, rangeX = g.W * 0.3, rangeY = 60;
+        if (w <= 1) {
+          // Simple slow sway
+          b.x = cx + Math.sin(b.angle) * rangeX * 0.6;
+        } else if (w <= 3) {
+          // Figure-8 pattern
+          b.x = cx + Math.sin(b.angle) * rangeX;
+          b.y = b.targetY + Math.sin(b.angle * 2) * rangeY * 0.5;
+        } else if (w <= 5) {
+          // Diagonal sweeps with vertical bobbing
+          b.x = cx + Math.sin(b.angle * 0.7) * rangeX + Math.cos(b.angle * 1.3) * rangeX * 0.3;
+          b.y = b.targetY + Math.sin(b.angle * 1.1) * rangeY * 0.7 + Math.cos(b.angle * 0.5) * rangeY * 0.3;
+        } else {
+          // Complex Lissajous patrol — wide sweeping arcs
+          b.x = cx + Math.sin(b.angle * 0.8) * rangeX + Math.sin(b.angle * 1.9) * rangeX * 0.4;
+          b.y = b.targetY + Math.sin(b.angle * 1.3) * rangeY + Math.cos(b.angle * 0.6) * rangeY * 0.5;
+        }
+        b.x = clamp(b.x, b.w / 2 + 10, g.W - b.w / 2 - 10);
+        b.y = clamp(b.y, 60, 220);
         b.shootTimer -= dt;
+        b.patternAngle += dt * 0.08;
         if (b.shootTimer <= 0) {
-          b.shootTimer = 55 + Math.random() * 25;
-          const base = Math.atan2(s.y - b.y, s.x - b.x);
-          for (let i = -1; i <= 1; i++) {
-            const a = base + i * 0.28;
-            g.eBullets.push({ id: nextId(), x: b.x, y: b.y + b.h / 2, vx: Math.cos(a) * 3.2, vy: Math.sin(a) * 3.2, sz: 6, boss: true });
+          b.shootTimer = b.fireRate + Math.random() * 30;
+          const aimed = Math.atan2(s.y - b.y, s.x - b.x);
+          const pattern = randInt(0, 3);
+          const patternColors = ['#ff6b6b', '#a78bfa', '#fbbf24', '#38bdf8']; // red=fan, purple=spiral, gold=shotgun, blue=ring
+          const col = patternColors[pattern];
+          for (let i = 0; i < b.bulletCount; i++) {
+            let a, spd = b.bulletSpeed;
+            if (pattern === 0) {
+              // Fan spread aimed at player
+              const half = (b.bulletCount - 1) / 2;
+              a = aimed + (i - half) * 0.3;
+            } else if (pattern === 1) {
+              // Spiral burst from rotating angle
+              a = b.patternAngle + (i / b.bulletCount) * Math.PI * 2;
+              spd *= 0.8 + Math.random() * 0.4;
+            } else if (pattern === 2) {
+              // Shotgun scatter toward player
+              a = aimed + (Math.random() - 0.5) * 1.2;
+              spd *= 0.7 + Math.random() * 0.6;
+            } else {
+              // Ring burst in all directions
+              a = (i / b.bulletCount) * Math.PI * 2 + Math.random() * 0.3;
+            }
+            g.eBullets.push({ id: nextId(), x: b.x, y: b.y + b.h / 2, vx: Math.cos(a) * spd, vy: Math.sin(a) * spd, sz: 6, boss: true, color: col });
           }
         }
       } else if (b.phase === 'dying') {
@@ -313,10 +524,12 @@ export default function MathStorm() {
           g.score += pts;
           g.shake = 18;
           g.texts.push({ x: b.x, y: b.y, text: `BOSS DEFEATED! +${pts}`, color: '#ffd700', life: 100, maxL: 100, vy: -1, sz: 22 });
+          // Boss always drops a heart
+          g.pickups.push({ id: nextId(), x: b.x, y: b.y, vy: 1.2, type: PICKUP_TYPES[0], bobT: 0 });
           g.boss = null;
-          g.worldIdx++;
-          g.nextBossAt = g.enemiesSpawned + ENEMIES_PER_BOSS + g.worldIdx * 5;
           g.texts.push({ x: g.W / 2, y: g.H / 2, text: 'WORLD COMPLETE!', color: '#4ade80', life: 120, maxL: 120, vy: -0.5, sz: 36 });
+          // Start world transition
+          g.transition = { phase: 'flyOut', timer: 80 };
         }
       }
       if (b && b.hitFlash > 0 && b.phase !== 'dying') b.hitFlash -= dt;
@@ -335,6 +548,8 @@ export default function MathStorm() {
 
       for (let ei = g.enemies.length - 1; ei >= 0; ei--) {
         const en = g.enemies[ei];
+        // DIV pierce: skip enemies already hit by this bullet
+        if (bul.pierce && bul.hitIds.includes(en.id)) continue;
         if (dist(bul, en) < en.w / 2 + bul.sz + 4) {
           const oldP = g.power;
           const newP = applyOp(g.power, bul.wep, en.value);
@@ -359,10 +574,23 @@ export default function MathStorm() {
               g.particles.push({ x: en.x + rand(-12, 12), y: en.y + rand(-12, 12), vx: rand(-4, 4), vy: rand(-4, 4), life: 18 + Math.random() * 14, maxL: 32, color: WEAPONS[bul.wep].color, sz: 2 + Math.random() * 4 });
             }
             g.shake = Math.min(g.shake + 3, 10);
+
+            // Drop pickup at combo milestones
+            if (g.combo >= g.lastComboPickup + COMBO_PICKUP_INTERVAL) {
+              g.lastComboPickup = g.combo;
+              const ptype = PICKUP_TYPES[randInt(0, PICKUP_TYPES.length - 1)];
+              g.pickups.push({ id: nextId(), x: en.x, y: en.y, vy: 1.2, type: ptype, bobT: Math.random() * Math.PI * 2 });
+            }
+
             g.enemies.splice(ei, 1);
           }
-          bul.alive = false;
-          break;
+          if (bul.pierce) {
+            // DIV: pass through, track hit enemy
+            bul.hitIds.push(en.id);
+          } else {
+            bul.alive = false;
+            break;
+          }
         }
       }
 
@@ -371,10 +599,12 @@ export default function MathStorm() {
         const bo = g.boss;
         if (dist(bul, bo) < bo.w / 2 + bul.sz) {
           if (g.power === bo.target) {
-            bo.hp--;
+            const primeDmg = (g.primeTimer > 0 && isPrime(g.power)) ? 2 : 1;
+            bo.hp -= primeDmg;
             bo.hitFlash = 15;
             g.shake = 10;
-            g.texts.push({ x: bo.x, y: bo.y - 55, text: 'SHIELD BREAK!', color: '#ffd700', life: 60, maxL: 60, vy: -2, sz: 20 });
+            const breakText = primeDmg > 1 ? 'PRIME BREAK! x2' : 'SHIELD BREAK!';
+            g.texts.push({ x: bo.x, y: bo.y - 55, text: breakText, color: '#ffd700', life: 60, maxL: 60, vy: -2, sz: 20 });
             for (let p = 0; p < 18; p++) {
               g.particles.push({ x: bo.x + rand(-45, 45), y: bo.y + rand(-35, 35), vx: rand(-5, 5), vy: rand(-5, 5), life: 22 + Math.random() * 18, maxL: 40, color: '#ffd700', sz: 3 + Math.random() * 5 });
             }
@@ -399,8 +629,27 @@ export default function MathStorm() {
     }
     g.bullets = g.bullets.filter(b => b.alive);
 
+    // ---- collisions: player bullets vs enemy bullets ----
+    for (let bi = g.bullets.length - 1; bi >= 0; bi--) {
+      const bul = g.bullets[bi];
+      if (!bul.alive) continue;
+      for (let ei = g.eBullets.length - 1; ei >= 0; ei--) {
+        if (dist(bul, g.eBullets[ei]) < bul.sz + g.eBullets[ei].sz + 2) {
+          const mx = (bul.x + g.eBullets[ei].x) / 2;
+          const my = (bul.y + g.eBullets[ei].y) / 2;
+          for (let p = 0; p < 5; p++) {
+            g.particles.push({ x: mx, y: my, vx: rand(-3, 3), vy: rand(-3, 3), life: 12 + Math.random() * 8, maxL: 20, color: '#fff', sz: 1.5 + Math.random() * 2 });
+          }
+          bul.alive = false;
+          g.eBullets.splice(ei, 1);
+          break;
+        }
+      }
+    }
+    g.bullets = g.bullets.filter(b => b.alive);
+
     // ---- collisions: enemy bullets / enemies vs player ----
-    if (s.invTimer <= 0) {
+    if (s.invTimer <= 0 && g.shieldTimer <= 0) {
       for (let i = g.eBullets.length - 1; i >= 0; i--) {
         if (dist(g.eBullets[i], s) < 16 + g.eBullets[i].sz) {
           hitPlayer(g);
@@ -414,6 +663,33 @@ export default function MathStorm() {
         }
       }
     }
+    } // end !transition guard
+
+    // ---- pickups ----
+    if (g.shieldTimer > 0) g.shieldTimer -= dt;
+    if (g.primeTimer > 0) g.primeTimer -= dt;
+    g.pickups = g.pickups.filter(pk => {
+      pk.bobT += dt * 0.1;
+      pk.y += pk.vy * dt;
+      pk.x += Math.sin(pk.bobT * 3) * 0.5 * dt;
+      // Collect if player touches
+      if (dist(pk, s) < 28) {
+        if (pk.type.id === 'heart') {
+          g.lives++;
+        } else if (pk.type.id === 'shield') {
+          g.shieldTimer = 300; // ~5 seconds
+          s.invTimer = Math.max(s.invTimer, 10);
+        } else if (pk.type.id === 'prime') {
+          g.primeTimer = 480; // ~8 seconds
+        }
+        g.texts.push({ x: pk.x, y: pk.y - 20, text: pk.type.label, color: pk.type.color, life: 60, maxL: 60, vy: -2, sz: 18 });
+        for (let p = 0; p < 10; p++) {
+          g.particles.push({ x: pk.x, y: pk.y, vx: rand(-4, 4), vy: rand(-4, 4), life: 15 + Math.random() * 10, maxL: 25, color: pk.type.color, sz: 2 + Math.random() * 3 });
+        }
+        return false;
+      }
+      return pk.y < g.H + 40;
+    });
 
     // ---- particles ----
     g.particles = g.particles.filter(p => { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= 0.97; p.vy *= 0.97; p.life -= dt; return p.life > 0; });
@@ -421,8 +697,9 @@ export default function MathStorm() {
     // ---- text effects ----
     g.texts = g.texts.filter(t => { t.y += (t.vy || 0) * dt; t.life -= dt; return t.life > 0; });
 
-    // ---- stars ----
+    // ---- stars & nebulae ----
     for (const st of g.stars) { st.y += st.speed * dt; if (st.y > g.H) { st.y = -2; st.x = Math.random() * g.W; } }
+    for (const nb of g.nebulae) { nb.y += nb.speed * dt; if (nb.y > g.H + nb.r) { nb.y = -nb.r; nb.x = Math.random() * g.W; } }
 
     // ---- hud update ----
     g.hudTick += dt;
@@ -434,6 +711,8 @@ export default function MathStorm() {
         bossHP: g.boss?.hp || 0, bossMaxHP: g.boss?.maxHP || 0,
         bossTarget: g.boss?.target || 0, bossActive: !!g.boss,
         powerMatch: !!(g.boss && g.boss.phase === 'fight' && g.power === g.boss.target),
+        shieldActive: g.shieldTimer > 0, primeActive: g.primeTimer > 0,
+        isPrime: isPrime(g.power),
         msg: '', msgTimer: 0,
       });
     }
@@ -533,6 +812,13 @@ export default function MathStorm() {
       // Entering phase — slight transparency
       if (b.phase === 'enter') ctx.globalAlpha = 0.7;
 
+      // Boss visual style varies per world
+      const bossStyle = g.worldIdx % 6;
+      const bossHues = [0, 280, 160, 30, 200, 330]; // red, purple, teal, orange, blue, magenta
+      const bossHue = bossHues[bossStyle];
+      const baseColor = b.hitFlash > 0 ? '#ffd700' : powerMatch ? `hsl(${bossHue},70%,25%)` : `hsl(${bossHue},65%,30%)`;
+      const strokeColor = b.hitFlash > 0 ? '#fff' : powerMatch ? '#ffd700' : `hsl(${bossHue},75%,55%)`;
+
       // Power match pulsing glow
       if (powerMatch) {
         const pulseSize = b.w * 1.3 + Math.sin(g.time * 0.15) * 15;
@@ -545,26 +831,107 @@ export default function MathStorm() {
       }
 
       // glow
-      const bgc = b.hitFlash > 0 ? 'rgba(255,215,0,0.45)' : powerMatch ? 'rgba(255,215,0,0.35)' : 'rgba(220,38,38,0.25)';
+      const bgc = b.hitFlash > 0 ? 'rgba(255,215,0,0.45)' : powerMatch ? 'rgba(255,215,0,0.35)' : `hsla(${bossHue},70%,50%,0.25)`;
       const bg = ctx.createRadialGradient(0, 0, 0, 0, 0, b.w);
       bg.addColorStop(0, bgc); bg.addColorStop(1, 'transparent');
       ctx.fillStyle = bg;
       ctx.beginPath(); ctx.arc(0, 0, b.w, 0, Math.PI * 2); ctx.fill();
 
-      // body octagon
-      ctx.fillStyle = b.hitFlash > 0 ? '#ffd700' : powerMatch ? '#b45309' : '#b91c1c';
-      ctx.strokeStyle = b.hitFlash > 0 ? '#fff' : powerMatch ? '#ffd700' : '#ef4444';
+      // Draw boss body shape based on world style
+      ctx.fillStyle = baseColor;
+      ctx.strokeStyle = strokeColor;
       ctx.lineWidth = 3;
-      ctx.beginPath();
-      for (let i = 0; i < 8; i++) {
-        const a = (i / 8) * Math.PI * 2 - Math.PI / 2;
-        const r = b.w / 2;
-        i === 0 ? ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r) : ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
-      }
-      ctx.closePath(); ctx.fill(); ctx.stroke();
+      const r = b.w / 2;
 
-      // inner ring
-      ctx.strokeStyle = powerMatch ? 'rgba(255,215,0,0.5)' : 'rgba(255,255,255,0.2)';
+      if (bossStyle === 0) {
+        // W1: Classic octagon
+        ctx.beginPath();
+        for (let i = 0; i < 8; i++) {
+          const a = (i / 8) * Math.PI * 2 - Math.PI / 2;
+          i === 0 ? ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r) : ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+        }
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+      } else if (bossStyle === 1) {
+        // W2: Spiked star — 5-point star with inner radius
+        ctx.beginPath();
+        for (let i = 0; i < 10; i++) {
+          const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+          const rad = i % 2 === 0 ? r * 1.1 : r * 0.5;
+          i === 0 ? ctx.moveTo(Math.cos(a) * rad, Math.sin(a) * rad) : ctx.lineTo(Math.cos(a) * rad, Math.sin(a) * rad);
+        }
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+      } else if (bossStyle === 2) {
+        // W3: Diamond with notched wings
+        ctx.beginPath();
+        ctx.moveTo(0, -r * 1.2);
+        ctx.lineTo(r * 0.4, -r * 0.4);
+        ctx.lineTo(r * 1.1, -r * 0.2);
+        ctx.lineTo(r * 0.6, r * 0.15);
+        ctx.lineTo(r * 0.9, r * 0.7);
+        ctx.lineTo(0, r * 0.5);
+        ctx.lineTo(-r * 0.9, r * 0.7);
+        ctx.lineTo(-r * 0.6, r * 0.15);
+        ctx.lineTo(-r * 1.1, -r * 0.2);
+        ctx.lineTo(-r * 0.4, -r * 0.4);
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+      } else if (bossStyle === 3) {
+        // W4: Hexagon with rotating inner triangle
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+          const a = (i / 6) * Math.PI * 2 - Math.PI / 2;
+          i === 0 ? ctx.moveTo(Math.cos(a) * r, Math.sin(a) * r) : ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+        }
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        // Rotating inner triangle accent
+        ctx.save();
+        ctx.rotate(g.time * 0.03);
+        ctx.strokeStyle = `hsla(${bossHue},90%,70%,0.6)`;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < 3; i++) {
+          const a = (i / 3) * Math.PI * 2;
+          i === 0 ? ctx.moveTo(Math.cos(a) * r * 0.55, Math.sin(a) * r * 0.55) : ctx.lineTo(Math.cos(a) * r * 0.55, Math.sin(a) * r * 0.55);
+        }
+        ctx.closePath(); ctx.stroke();
+        ctx.restore();
+      } else if (bossStyle === 4) {
+        // W5: Concentric rings with gear teeth
+        const teeth = 12;
+        ctx.beginPath();
+        for (let i = 0; i < teeth * 2; i++) {
+          const a = (i / (teeth * 2)) * Math.PI * 2 - Math.PI / 2;
+          const rad = i % 2 === 0 ? r * 1.05 : r * 0.8;
+          i === 0 ? ctx.moveTo(Math.cos(a) * rad, Math.sin(a) * rad) : ctx.lineTo(Math.cos(a) * rad, Math.sin(a) * rad);
+        }
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        // Inner ring
+        ctx.fillStyle = `hsl(${bossHue},50%,20%)`;
+        ctx.beginPath(); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2); ctx.fill();
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(0, 0, r * 0.55, 0, Math.PI * 2); ctx.stroke();
+      } else {
+        // W6+: Crystalline — irregular polygon with faceted look
+        ctx.beginPath();
+        const facets = 9;
+        for (let i = 0; i < facets; i++) {
+          const a = (i / facets) * Math.PI * 2 - Math.PI / 2;
+          const rad = r * (0.8 + 0.3 * Math.sin(i * 2.7 + 1.3));
+          i === 0 ? ctx.moveTo(Math.cos(a) * rad, Math.sin(a) * rad) : ctx.lineTo(Math.cos(a) * rad, Math.sin(a) * rad);
+        }
+        ctx.closePath(); ctx.fill(); ctx.stroke();
+        // Facet lines from center
+        ctx.strokeStyle = `hsla(${bossHue},80%,70%,0.3)`;
+        ctx.lineWidth = 1;
+        for (let i = 0; i < facets; i++) {
+          const a = (i / facets) * Math.PI * 2 - Math.PI / 2;
+          const rad = r * (0.8 + 0.3 * Math.sin(i * 2.7 + 1.3));
+          ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a) * rad * 0.9, Math.sin(a) * rad * 0.9); ctx.stroke();
+        }
+      }
+
+      // inner core ring (all bosses)
+      ctx.strokeStyle = powerMatch ? 'rgba(255,215,0,0.5)' : `hsla(${bossHue},60%,60%,0.3)`;
       ctx.lineWidth = 2;
       ctx.beginPath(); ctx.arc(0, 0, b.w / 3, 0, Math.PI * 2); ctx.stroke();
 
@@ -612,12 +979,35 @@ export default function MathStorm() {
       ctx.shadowColor = w.color;
       ctx.shadowBlur = 8;
       if (b.wep === 0) {
+        // ADD: circle
         ctx.beginPath(); ctx.arc(0, 0, b.sz, 0, Math.PI * 2); ctx.fill();
-      } else {
+      } else if (b.wep === 1) {
+        // SUB: triangle
         ctx.beginPath();
         ctx.moveTo(0, -b.sz * 1.5);
         ctx.lineTo(-b.sz, b.sz);
         ctx.lineTo(b.sz, b.sz);
+        ctx.closePath(); ctx.fill();
+      } else if (b.wep === 2) {
+        // MUL: rotating X / star shape
+        const rot = g.time * 0.15;
+        ctx.beginPath();
+        for (let i = 0; i < 4; i++) {
+          const a = rot + (i / 4) * Math.PI * 2;
+          ctx.moveTo(0, 0);
+          ctx.lineTo(Math.cos(a) * b.sz * 1.5, Math.sin(a) * b.sz * 1.5);
+        }
+        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = w.color;
+        ctx.stroke();
+        ctx.beginPath(); ctx.arc(0, 0, b.sz * 0.5, 0, Math.PI * 2); ctx.fill();
+      } else if (b.wep === 3) {
+        // DIV: elongated diamond / laser bolt
+        ctx.beginPath();
+        ctx.moveTo(0, -b.sz * 2.5);
+        ctx.lineTo(-b.sz * 0.6, 0);
+        ctx.lineTo(0, b.sz * 2.5);
+        ctx.lineTo(b.sz * 0.6, 0);
         ctx.closePath(); ctx.fill();
       }
       ctx.restore();
@@ -627,8 +1017,9 @@ export default function MathStorm() {
     for (const b of g.eBullets) {
       ctx.save();
       ctx.translate(b.x, b.y);
-      ctx.fillStyle = b.boss ? '#ff6b6b' : '#fbbf24';
-      ctx.shadowColor = b.boss ? '#ff0000' : '#fbbf24';
+      const bc = b.color || (b.boss ? '#ff6b6b' : '#fbbf24');
+      ctx.fillStyle = bc;
+      ctx.shadowColor = bc;
       ctx.shadowBlur = 8;
       ctx.beginPath(); ctx.arc(0, 0, b.sz, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
@@ -677,6 +1068,55 @@ export default function MathStorm() {
       ctx.beginPath();
       ctx.ellipse(0, -8, 4, 8, 0, 0, Math.PI * 2);
       ctx.fill();
+
+      // Shield bubble effect
+      if (g.shieldTimer > 0) {
+        const pulse = 30 + Math.sin(g.time * 0.2) * 5;
+        ctx.strokeStyle = `rgba(56,189,248,${0.4 + Math.sin(g.time * 0.15) * 0.2})`;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath(); ctx.arc(0, 0, pulse, 0, Math.PI * 2); ctx.stroke();
+        const sg2 = ctx.createRadialGradient(0, 0, pulse * 0.5, 0, 0, pulse);
+        sg2.addColorStop(0, 'transparent');
+        sg2.addColorStop(1, 'rgba(56,189,248,0.1)');
+        ctx.fillStyle = sg2;
+        ctx.beginPath(); ctx.arc(0, 0, pulse, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // Prime surge glow
+      if (g.primeTimer > 0 && isPrime(g.power)) {
+        const pg = ctx.createRadialGradient(0, 0, 0, 0, 0, 45);
+        pg.addColorStop(0, 'rgba(255,215,0,0.35)');
+        pg.addColorStop(1, 'transparent');
+        ctx.fillStyle = pg;
+        ctx.beginPath(); ctx.arc(0, 0, 45, 0, Math.PI * 2); ctx.fill();
+      }
+
+      ctx.restore();
+    }
+
+    // pickups
+    for (const pk of g.pickups) {
+      ctx.save();
+      ctx.translate(pk.x, pk.y);
+      const bob = Math.sin(pk.bobT * 3) * 3;
+      ctx.translate(0, bob);
+      // glow
+      const pg = ctx.createRadialGradient(0, 0, 0, 0, 0, 18);
+      pg.addColorStop(0, pk.type.color + '80'); pg.addColorStop(1, 'transparent');
+      ctx.fillStyle = pg;
+      ctx.beginPath(); ctx.arc(0, 0, 18, 0, Math.PI * 2); ctx.fill();
+      // body
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.beginPath(); ctx.arc(0, 0, 12, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = pk.type.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(0, 0, 12, 0, Math.PI * 2); ctx.stroke();
+      // symbol
+      ctx.fillStyle = pk.type.color;
+      ctx.font = 'bold 14px Nunito, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(pk.type.symbol, 0, 1);
       ctx.restore();
     }
 
@@ -740,46 +1180,63 @@ export default function MathStorm() {
         <style>{styles}</style>
         <div className="ms-intro">
           <div className="ms-intro-stars">
-            {[...Array(40)].map((_, i) => (
+            {[...Array(60)].map((_, i) => (
               <div key={i} className="ms-star" style={{
                 left: `${Math.random() * 100}%`, top: `${Math.random() * 100}%`,
-                width: 1 + Math.random() * 3, height: 1 + Math.random() * 3,
-                animationDelay: `${Math.random() * 4}s`, animationDuration: `${2 + Math.random() * 3}s`,
+                width: 1 + Math.random() * 2.5, height: 1 + Math.random() * 2.5,
+                animationDelay: `${Math.random() * 5}s`, animationDuration: `${2 + Math.random() * 4}s`,
               }} />
             ))}
           </div>
+          <div className="ms-scanlines" />
           <div className="ms-intro-body">
             <div className="ms-logo-wrap">
-              <span className="ms-logo-icon">⚡</span>
-              <h1 className="ms-title">MATHSTORM</h1>
-              <span className="ms-logo-icon flip">⚡</span>
+              <div className="ms-logo-deco ms-logo-deco-l" />
+              <div className="ms-logo-stack">
+                <h1 className="ms-title">MATHSTORM</h1>
+                <p className="ms-subtitle">NUMBER SQUADRON</p>
+              </div>
+              <div className="ms-logo-deco ms-logo-deco-r" />
             </div>
-            <p className="ms-subtitle">NUMBER SQUADRON</p>
 
             <div className="ms-card">
-              <h3>How to Play</h3>
-              <div className="ms-rule">
-                <span className="ms-rule-icon" style={{ background: 'rgba(74,222,128,0.2)', color: '#4ade80' }}>+</span>
-                <div><strong style={{ color: '#4ade80' }}>ADD weapon</strong> — Rapid fire. Adds enemy's number to your Power Number.</div>
+              <div className="ms-card-header">
+                <div className="ms-card-line" />
+                <span>ARSENAL</span>
+                <div className="ms-card-line" />
               </div>
-              <div className="ms-rule">
-                <span className="ms-rule-icon" style={{ background: 'rgba(251,146,60,0.2)', color: '#fb923c' }}>−</span>
-                <div><strong style={{ color: '#fb923c' }}>SUB weapon</strong> — Homing shots. Subtracts enemy's number from your Power.</div>
+              <div className="ms-weapons-grid">
+                <div className="ms-rule" style={{ '--rc': '#4ade80' }}>
+                  <span className="ms-rule-icon">+</span>
+                  <div className="ms-rule-body"><strong>ADD</strong><span>Rapid fire. Adds to your Power.</span></div>
+                </div>
+                <div className="ms-rule" style={{ '--rc': '#fb923c' }}>
+                  <span className="ms-rule-icon">{'\u2212'}</span>
+                  <div className="ms-rule-body"><strong>SUB</strong><span>Homing shots. Subtracts from Power.</span></div>
+                </div>
+                <div className="ms-rule" style={{ '--rc': '#a78bfa' }}>
+                  <span className="ms-rule-icon">{'\u00d7'}</span>
+                  <div className="ms-rule-body"><strong>MUL</strong><span>Heavy burst. Multiplies your Power.</span></div>
+                </div>
+                <div className="ms-rule" style={{ '--rc': '#38bdf8' }}>
+                  <span className="ms-rule-icon">{'\u00f7'}</span>
+                  <div className="ms-rule-body"><strong>DIV</strong><span>Pierce shot. Divides your Power.</span></div>
+                </div>
               </div>
-              <div className="ms-rule">
-                <span className="ms-rule-icon" style={{ background: 'rgba(239,68,68,0.2)', color: '#ef4444' }}>💥</span>
-                <div><strong style={{ color: '#ef4444' }}>Bosses</strong> have shields with a target number. Match your Power Number to break through!</div>
+              <div className="ms-boss-callout">
+                Match your Power number to the boss shield to break through!
               </div>
             </div>
 
             <div className="ms-controls">
-              <div className="ms-ctrl"><kbd>WASD</kbd> / <kbd>↑↓←→</kbd> Move</div>
-              <div className="ms-ctrl"><kbd>Space</kbd> / <kbd>Z</kbd> Shoot</div>
-              <div className="ms-ctrl"><kbd>1</kbd> <kbd>2</kbd> Switch weapon</div>
+              <div className="ms-ctrl"><kbd>WASD</kbd> <span className="ms-ctrl-sep">/</span> <kbd>{'\u2190\u2191\u2192\u2193'}</kbd> <span className="ms-ctrl-label">Move</span></div>
+              <div className="ms-ctrl"><kbd>Space</kbd> <span className="ms-ctrl-sep">/</span> <kbd>Z</kbd> <span className="ms-ctrl-label">Shoot</span></div>
+              <div className="ms-ctrl"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd> <span className="ms-ctrl-label">Weapon</span></div>
             </div>
 
             <button className="ms-start-btn" onClick={() => setScreen('playing')}>
-              <span>⚡</span> LAUNCH MISSION <span>⚡</span>
+              LAUNCH MISSION
+              <span className="ms-btn-shine" />
             </button>
           </div>
         </div>
@@ -795,23 +1252,40 @@ export default function MathStorm() {
         <style>{styles}</style>
         <div className="ms-gameover">
           <div className="ms-intro-stars">
-            {[...Array(25)].map((_, i) => (
+            {[...Array(35)].map((_, i) => (
               <div key={i} className="ms-star" style={{
                 left: `${Math.random() * 100}%`, top: `${Math.random() * 100}%`,
-                width: 1 + Math.random() * 3, height: 1 + Math.random() * 3,
-                animationDelay: `${Math.random() * 4}s`, animationDuration: `${2 + Math.random() * 3}s`,
+                width: 1 + Math.random() * 2.5, height: 1 + Math.random() * 2.5,
+                animationDelay: `${Math.random() * 5}s`, animationDuration: `${2 + Math.random() * 4}s`,
               }} />
             ))}
           </div>
+          <div className="ms-scanlines" />
           <div className="ms-go-body">
+            <div className="ms-go-icon">
+              <svg width="56" height="56" viewBox="0 0 56 56" fill="none">
+                <circle cx="28" cy="28" r="24" stroke="#ef4444" strokeWidth="2" strokeDasharray="4 3" opacity="0.5"/>
+                <path d="M20 20L36 36M36 20L20 36" stroke="#ef4444" strokeWidth="3" strokeLinecap="round"/>
+              </svg>
+            </div>
             <h1 className="ms-go-title">MISSION FAILED</h1>
             <div className="ms-go-stats">
-              <div className="ms-go-stat"><span className="ms-go-label">Final Score</span><span className="ms-go-val">{finalScore}</span></div>
-              <div className="ms-go-stat"><span className="ms-go-label">World Reached</span><span className="ms-go-val">{finalWorld}</span></div>
+              <div className="ms-go-stat">
+                <span className="ms-go-label">SCORE</span>
+                <span className="ms-go-val">{finalScore.toLocaleString()}</span>
+              </div>
+              <div className="ms-go-divider" />
+              <div className="ms-go-stat">
+                <span className="ms-go-label">WORLD</span>
+                <span className="ms-go-val">{finalWorld}</span>
+              </div>
             </div>
             <div className="ms-go-btns">
-              <button className="ms-start-btn" onClick={() => setScreen('playing')}>⚡ RETRY ⚡</button>
-              <button className="ms-menu-btn" onClick={() => setScreen('intro')}>Main Menu</button>
+              <button className="ms-start-btn" onClick={() => setScreen('playing')}>
+                RETRY MISSION
+                <span className="ms-btn-shine" />
+              </button>
+              <button className="ms-menu-btn" onClick={() => setScreen('intro')}>Return to Base</button>
             </div>
           </div>
         </div>
@@ -829,22 +1303,31 @@ export default function MathStorm() {
         {/* HUD Overlay */}
         <div className="ms-hud-top">
           <div className="ms-hud-left">
-            <div className="ms-wave-badge">W{hud.world}</div>
+            <div className="ms-wave-badge">
+              <span className="ms-wave-label">WORLD</span>
+              <span className="ms-wave-num">{hud.world}</span>
+            </div>
             <div className="ms-lives">
-              {[...Array(Math.max(0, hud.lives))].map((_, i) => <span key={i} className="ms-heart">♥</span>)}
+              {[...Array(Math.max(0, hud.lives))].map((_, i) => (
+                <span key={i} className="ms-heart">
+                  <svg width="14" height="13" viewBox="0 0 14 13" fill="#ef4444">
+                    <path d="M7 12.5 C7 12.5 0.5 8 0.5 4.5 C0.5 2.5 2 1 3.8 1 C5.1 1 6.3 1.8 7 3 C7.7 1.8 8.9 1 10.2 1 C12 1 13.5 2.5 13.5 4.5 C13.5 8 7 12.5 7 12.5Z"/>
+                  </svg>
+                </span>
+              ))}
             </div>
           </div>
           <div className="ms-hud-center">
             <div className="ms-power-display">
-              <span className="ms-power-label">POWER</span>
+              <span className="ms-power-label">PWR</span>
               <span className="ms-power-num" key={hud.power}>{hud.power}</span>
             </div>
           </div>
           <div className="ms-hud-right">
-            <div className="ms-score-badge">
-              <span className="ms-score-star">⭐</span> {hud.score}
-            </div>
-            {hud.combo > 2 && <div className="ms-combo">{hud.combo}x COMBO</div>}
+            <div className="ms-score-badge">{hud.score.toLocaleString()}</div>
+            {hud.combo > 2 && <div className="ms-combo">{hud.combo}x</div>}
+            {hud.shieldActive && <div className="ms-effect-badge ms-eff-shield">{'\u25c6'} SHIELD</div>}
+            {hud.primeActive && <div className="ms-effect-badge ms-eff-prime">{'\u26a1'} PRIME{hud.isPrime ? ' !' : ''}</div>}
           </div>
         </div>
 
@@ -869,15 +1352,16 @@ export default function MathStorm() {
           <div className={`ms-boss-hud ${hud.powerMatch ? 'ms-boss-match' : ''}`}>
             <div className="ms-boss-label">
               {hud.powerMatch
-                ? <span className="ms-match-text">{'\u26A1'} POWER MATCHED — FIRE! {'\u26A1'}</span>
-                : <>BOSS — Shield: {hud.bossTarget}</>
+                ? <span className="ms-match-text">{'\u26A1'} POWER MATCHED {'\u2014'} FIRE! {'\u26A1'}</span>
+                : <>BOSS {'\u2014'} Shield: <strong>{hud.bossTarget}</strong></>
               }
             </div>
             <div className="ms-boss-bar-bg">
               <div className="ms-boss-bar-fill" style={{ width: `${(hud.bossHP / hud.bossMaxHP) * 100}%` }} />
+              <div className="ms-boss-bar-shine" />
             </div>
             {!hud.powerMatch && hud.bossTarget > 0 && (
-              <div className="ms-boss-hint">Get POWER to {hud.bossTarget} then attack!</div>
+              <div className="ms-boss-hint">Get POWER to <strong>{hud.bossTarget}</strong> then attack!</div>
             )}
           </div>
         )}
@@ -888,24 +1372,41 @@ export default function MathStorm() {
 
 // =============== STYLES ===============
 const styles = `
-@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Exo+2:wght@300;400;500;600;700;800;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&display=swap');
 @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&display=swap');
+
+:root {
+  --ms-bg: #04060e;
+  --ms-surface: rgba(255,255,255,0.03);
+  --ms-border: rgba(255,255,255,0.06);
+  --ms-glass: rgba(8,12,24,0.7);
+  --ms-glass-border: rgba(100,140,255,0.12);
+  --ms-text: #c8d6e5;
+  --ms-text-dim: #4a5568;
+  --ms-accent: #6c8cff;
+  --ms-glow: rgba(108,140,255,0.3);
+}
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 .ms-root {
   width: 100%; height: 100vh;
-  font-family: 'Nunito', sans-serif;
+  font-family: 'Exo 2', sans-serif;
   overflow: hidden;
-  background: #070b14;
-  color: #e2e8f0;
+  background: var(--ms-bg);
+  color: var(--ms-text);
 }
 
-/* ===== INTRO ===== */
+/* ===== SHARED ===== */
 .ms-intro, .ms-gameover {
   height: 100vh; display: flex; align-items: center; justify-content: center;
   position: relative; overflow: hidden;
-  background: linear-gradient(180deg, #070b14 0%, #0f172a 50%, #070b14 100%);
+  background:
+    radial-gradient(ellipse 80% 50% at 50% 0%, rgba(60,80,180,0.12) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 20% 100%, rgba(120,60,200,0.08) 0%, transparent 50%),
+    radial-gradient(ellipse 60% 40% at 80% 100%, rgba(40,120,200,0.06) 0%, transparent 50%),
+    var(--ms-bg);
 }
 .ms-intro-stars { position: absolute; inset: 0; pointer-events: none; }
 .ms-star {
@@ -913,97 +1414,246 @@ const styles = `
   animation: msTwinkle 3s ease-in-out infinite alternate;
 }
 @keyframes msTwinkle {
-  0% { opacity: 0.15; transform: scale(1); }
-  100% { opacity: 0.8; transform: scale(1.3); }
+  0% { opacity: 0.08; transform: scale(1); }
+  100% { opacity: 0.6; transform: scale(1.5); }
 }
+
+/* Scanline overlay */
+.ms-scanlines {
+  position: absolute; inset: 0; pointer-events: none; z-index: 5;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0,0,0,0.08) 2px,
+    rgba(0,0,0,0.08) 4px
+  );
+  mix-blend-mode: multiply;
+}
+
+/* ===== INTRO ===== */
 .ms-intro-body, .ms-go-body {
   position: relative; z-index: 10; text-align: center;
-  padding: 2rem; max-width: 520px; width: 100%;
+  padding: 2rem; max-width: 480px; width: 100%;
+  animation: msFadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1);
 }
+@keyframes msFadeUp {
+  0% { opacity: 0; transform: translateY(30px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
 .ms-logo-wrap {
-  display: flex; align-items: center; justify-content: center; gap: 0.8rem; margin-bottom: 0.3rem;
+  display: flex; align-items: center; justify-content: center; gap: 1.5rem;
+  margin-bottom: 2rem;
 }
-.ms-logo-icon {
-  font-size: 2rem; animation: msZap 1.5s ease-in-out infinite;
+.ms-logo-deco {
+  width: 50px; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--ms-accent), transparent);
+  opacity: 0.4;
+  animation: msDecoGlow 3s ease-in-out infinite alternate;
 }
-.ms-logo-icon.flip { animation-delay: 0.5s; }
-@keyframes msZap {
-  0%,100% { transform: translateY(0) rotate(0); opacity: 0.7; }
-  50% { transform: translateY(-6px) rotate(10deg); opacity: 1; }
+@keyframes msDecoGlow {
+  0% { opacity: 0.2; width: 30px; } 100% { opacity: 0.6; width: 60px; }
 }
+.ms-logo-stack { display: flex; flex-direction: column; align-items: center; }
 .ms-title {
   font-family: 'Orbitron', sans-serif;
-  font-size: clamp(2.2rem, 8vw, 3.2rem);
+  font-size: clamp(2rem, 7vw, 2.8rem);
   font-weight: 900;
-  background: linear-gradient(135deg, #38bdf8, #818cf8, #f472b6);
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-  background-clip: text; letter-spacing: 2px;
+  letter-spacing: 4px;
+  color: #fff;
+  text-shadow: 0 0 40px rgba(108,140,255,0.3), 0 0 80px rgba(108,140,255,0.1);
+  animation: msTitleShimmer 4s ease-in-out infinite alternate;
+}
+@keyframes msTitleShimmer {
+  0% { text-shadow: 0 0 40px rgba(108,140,255,0.3), 0 0 80px rgba(108,140,255,0.1); }
+  50% { text-shadow: 0 0 50px rgba(160,120,255,0.35), 0 0 100px rgba(160,120,255,0.12); }
+  100% { text-shadow: 0 0 40px rgba(80,180,255,0.3), 0 0 80px rgba(80,180,255,0.1); }
 }
 .ms-subtitle {
-  font-family: 'Orbitron', sans-serif;
-  font-size: 1rem; color: #64748b; letter-spacing: 6px;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 0.85rem; font-weight: 500;
+  color: var(--ms-text-dim); letter-spacing: 8px;
+  text-transform: uppercase;
+}
+
+/* Card */
+.ms-card {
+  background: var(--ms-glass);
+  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--ms-glass-border);
+  border-radius: 16px; padding: 1.2rem 1.4rem; margin-bottom: 1.5rem;
+  text-align: left;
+  position: relative; overflow: hidden;
+}
+.ms-card::before {
+  content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(108,140,255,0.3), transparent);
+}
+.ms-card-header {
+  display: flex; align-items: center; gap: 0.8rem;
+  margin-bottom: 1rem; justify-content: center;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 0.7rem; font-weight: 600;
+  color: var(--ms-text-dim); letter-spacing: 4px;
+  text-transform: uppercase;
+}
+.ms-card-line {
+  flex: 1; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--ms-border), transparent);
+}
+.ms-weapons-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0.6rem;
+}
+.ms-rule {
+  display: flex; align-items: center; gap: 0.6rem;
+  padding: 0.55rem 0.7rem;
+  background: rgba(255,255,255,0.02);
+  border: 1px solid rgba(255,255,255,0.04);
+  border-radius: 10px;
+  transition: border-color 0.3s, background 0.3s;
+}
+.ms-rule:hover {
+  border-color: color-mix(in srgb, var(--rc) 25%, transparent);
+  background: color-mix(in srgb, var(--rc) 4%, transparent);
+}
+.ms-rule-icon {
+  flex-shrink: 0; width: 32px; height: 32px; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.1rem; font-weight: 900;
+  color: var(--rc);
+  background: color-mix(in srgb, var(--rc) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--rc) 20%, transparent);
+}
+.ms-rule-body {
+  display: flex; flex-direction: column; gap: 0.1rem;
+  font-size: 0.78rem; line-height: 1.3;
+}
+.ms-rule-body strong {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 0.72rem; font-weight: 700;
+  color: var(--rc); letter-spacing: 1px; text-transform: uppercase;
+}
+.ms-rule-body span { color: var(--ms-text-dim); font-size: 0.72rem; }
+.ms-boss-callout {
+  margin-top: 0.8rem; padding: 0.5rem 0.7rem;
+  text-align: center; font-size: 0.72rem;
+  color: #94a3b8; line-height: 1.4;
+  border-top: 1px solid var(--ms-border);
+  font-family: 'Rajdhani', sans-serif;
+  font-weight: 500; letter-spacing: 0.5px;
+}
+
+/* Controls */
+.ms-controls {
+  display: flex; flex-wrap: wrap; justify-content: center; gap: 0.5rem 1rem;
   margin-bottom: 1.8rem;
 }
-.ms-card {
-  background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 20px; padding: 1.3rem 1.5rem; margin-bottom: 1.5rem;
-  text-align: left;
+.ms-ctrl {
+  display: flex; align-items: center; gap: 0.25rem;
+  font-size: 0.78rem; color: var(--ms-text-dim);
 }
-.ms-card h3 { text-align: center; margin-bottom: 1rem; font-size: 1.05rem; color: #94a3b8; }
-.ms-rule {
-  display: flex; align-items: flex-start; gap: 0.8rem; margin-bottom: 0.9rem;
-  font-size: 0.9rem; color: #cbd5e1; line-height: 1.4;
+.ms-ctrl-sep { opacity: 0.3; margin: 0 0.1rem; }
+.ms-ctrl-label {
+  font-family: 'Rajdhani', sans-serif;
+  font-weight: 600; letter-spacing: 1px;
+  font-size: 0.7rem; text-transform: uppercase;
+  color: var(--ms-text-dim);
 }
-.ms-rule:last-child { margin-bottom: 0; }
-.ms-rule-icon {
-  flex-shrink: 0; width: 36px; height: 36px; border-radius: 10px;
-  display: flex; align-items: center; justify-content: center;
-  font-size: 1.2rem; font-weight: 900;
-}
-.ms-controls {
-  display: flex; flex-wrap: wrap; justify-content: center; gap: 0.6rem 1.2rem;
-  margin-bottom: 1.8rem; font-size: 0.85rem; color: #64748b;
-}
-.ms-ctrl { display: flex; align-items: center; gap: 0.3rem; }
 .ms-ctrl kbd {
-  padding: 0.15rem 0.45rem; background: rgba(255,255,255,0.08);
-  border: 1px solid rgba(255,255,255,0.15); border-radius: 5px;
-  font-family: 'Orbitron', monospace; font-size: 0.75rem; color: #94a3b8;
+  padding: 0.2rem 0.45rem;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.08);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  font-family: 'Orbitron', monospace; font-size: 0.65rem;
+  color: #7a8ba8;
 }
+
+/* CTA button */
 .ms-start-btn {
-  display: inline-flex; align-items: center; gap: 0.7rem;
-  padding: 0.9rem 2.2rem;
-  font-family: 'Orbitron', sans-serif; font-size: 1.05rem; font-weight: 700;
-  color: white;
-  background: linear-gradient(135deg, #3b82f6, #7c3aed);
-  border: none; border-radius: 50px; cursor: pointer;
-  box-shadow: 0 8px 30px rgba(59,130,246,0.4);
-  transition: all 0.25s ease; letter-spacing: 1px;
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 0.6rem; padding: 0.85rem 2.5rem;
+  font-family: 'Orbitron', sans-serif; font-size: 0.85rem; font-weight: 700;
+  color: white; letter-spacing: 2px;
+  background: linear-gradient(135deg, #4060d0, #6040c0);
+  border: 1px solid rgba(120,140,255,0.3);
+  border-radius: 10px; cursor: pointer;
+  position: relative; overflow: hidden;
+  box-shadow:
+    0 4px 24px rgba(64,96,208,0.25),
+    inset 0 1px 0 rgba(255,255,255,0.1);
+  transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 .ms-start-btn:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 12px 40px rgba(59,130,246,0.55);
+  transform: translateY(-2px);
+  box-shadow:
+    0 8px 40px rgba(64,96,208,0.4),
+    inset 0 1px 0 rgba(255,255,255,0.15);
+  border-color: rgba(140,160,255,0.5);
+}
+.ms-start-btn:active { transform: translateY(0); }
+.ms-btn-shine {
+  position: absolute; top: 0; left: -100%; width: 100%; height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.15), transparent);
+  animation: msBtnShine 3s ease-in-out infinite;
+}
+@keyframes msBtnShine {
+  0% { left: -100%; } 40%,100% { left: 200%; }
 }
 
 /* ===== GAME OVER ===== */
+.ms-go-icon {
+  margin-bottom: 1rem;
+  animation: msGoIcon 2s ease-in-out infinite alternate;
+}
+@keyframes msGoIcon {
+  0% { opacity: 0.5; transform: scale(0.95); }
+  100% { opacity: 1; transform: scale(1.05); }
+}
 .ms-go-title {
   font-family: 'Orbitron', sans-serif;
-  font-size: clamp(1.6rem, 6vw, 2.4rem);
+  font-size: clamp(1.4rem, 5vw, 2rem);
   font-weight: 900; color: #ef4444;
-  margin-bottom: 1.5rem; letter-spacing: 3px;
+  margin-bottom: 1.5rem; letter-spacing: 4px;
+  text-shadow: 0 0 30px rgba(239,68,68,0.3);
 }
-.ms-go-stats { display: flex; justify-content: center; gap: 2.5rem; margin-bottom: 2rem; }
-.ms-go-stat { display: flex; flex-direction: column; align-items: center; }
-.ms-go-label { font-size: 0.8rem; color: #64748b; margin-bottom: 0.3rem; }
-.ms-go-val { font-family: 'Orbitron', sans-serif; font-size: 2rem; font-weight: 900; color: white; }
-.ms-go-btns { display: flex; flex-direction: column; gap: 0.8rem; align-items: center; }
+.ms-go-stats {
+  display: flex; justify-content: center; align-items: center;
+  gap: 2rem; margin-bottom: 2rem;
+  padding: 1rem 1.5rem;
+  background: var(--ms-glass);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--ms-glass-border);
+  border-radius: 14px;
+}
+.ms-go-divider {
+  width: 1px; height: 40px;
+  background: linear-gradient(180deg, transparent, var(--ms-glass-border), transparent);
+}
+.ms-go-stat { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; }
+.ms-go-label {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 0.65rem; font-weight: 600;
+  color: var(--ms-text-dim); letter-spacing: 3px; text-transform: uppercase;
+}
+.ms-go-val {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 1.8rem; font-weight: 900; color: white;
+  text-shadow: 0 0 20px rgba(255,255,255,0.15);
+}
+.ms-go-btns { display: flex; flex-direction: column; gap: 0.7rem; align-items: center; }
 .ms-menu-btn {
-  padding: 0.7rem 2rem; font-family: 'Orbitron', sans-serif;
-  font-size: 0.85rem; font-weight: 600; color: #94a3b8;
-  background: transparent; border: 1px solid rgba(255,255,255,0.15);
-  border-radius: 30px; cursor: pointer; transition: all 0.2s;
+  padding: 0.6rem 1.8rem; font-family: 'Rajdhani', sans-serif;
+  font-size: 0.8rem; font-weight: 600; color: var(--ms-text-dim);
+  background: transparent; border: 1px solid var(--ms-border);
+  border-radius: 8px; cursor: pointer;
+  transition: all 0.25s; letter-spacing: 1px;
 }
-.ms-menu-btn:hover { border-color: rgba(255,255,255,0.3); color: #e2e8f0; }
+.ms-menu-btn:hover {
+  border-color: rgba(255,255,255,0.15); color: var(--ms-text);
+  background: rgba(255,255,255,0.03);
+}
 
 /* ===== GAME ===== */
 .ms-game {
@@ -1015,139 +1665,221 @@ const styles = `
 /* HUD */
 .ms-hud-top {
   position: absolute; top: 0; left: 0; right: 0;
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 0.6rem 0.8rem;
-  background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, transparent 100%);
+  display: flex; justify-content: space-between; align-items: flex-start;
+  padding: 0.5rem 0.7rem;
+  background: linear-gradient(180deg, rgba(4,6,14,0.85) 0%, rgba(4,6,14,0.4) 60%, transparent 100%);
   pointer-events: none; z-index: 20;
 }
 .ms-hud-left, .ms-hud-right {
-  display: flex; align-items: center; gap: 0.6rem;
+  display: flex; align-items: center; gap: 0.5rem;
 }
+.ms-hud-right { flex-direction: column; align-items: flex-end; gap: 0.3rem; }
 .ms-wave-badge {
-  font-family: 'Orbitron', sans-serif;
-  padding: 0.35rem 0.8rem;
-  background: linear-gradient(135deg, #3b82f6, #7c3aed);
-  border-radius: 16px; font-size: 0.8rem; font-weight: 700; color: white;
+  display: flex; align-items: center; gap: 0.35rem;
+  padding: 0.3rem 0.65rem;
+  background: rgba(108,140,255,0.1);
+  border: 1px solid rgba(108,140,255,0.2);
+  border-radius: 8px;
 }
-.ms-lives { display: flex; gap: 0.25rem; }
-.ms-heart { font-size: 1.1rem; color: #ef4444; }
+.ms-wave-label {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 0.55rem; font-weight: 600;
+  color: var(--ms-accent); letter-spacing: 2px;
+  text-transform: uppercase; opacity: 0.7;
+}
+.ms-wave-num {
+  font-family: 'Orbitron', sans-serif;
+  font-size: 0.85rem; font-weight: 800; color: #fff;
+}
+.ms-lives { display: flex; gap: 0.3rem; align-items: center; }
+.ms-heart {
+  display: flex; align-items: center;
+  filter: drop-shadow(0 0 4px rgba(239,68,68,0.5));
+}
 .ms-hud-center { display: flex; flex-direction: column; align-items: center; }
 .ms-power-display {
-  display: flex; flex-direction: column; align-items: center;
-  background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 14px; padding: 0.25rem 1rem;
+  display: flex; align-items: baseline; gap: 0.4rem;
+  padding: 0.3rem 0.9rem;
+  background: var(--ms-glass);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid var(--ms-glass-border);
+  border-radius: 10px;
 }
 .ms-power-label {
-  font-family: 'Orbitron', sans-serif;
-  font-size: 0.55rem; color: #64748b; letter-spacing: 2px;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 0.6rem; font-weight: 600;
+  color: var(--ms-text-dim); letter-spacing: 2px;
 }
 .ms-power-num {
   font-family: 'Orbitron', sans-serif;
-  font-size: 1.6rem; font-weight: 900; color: #fff;
-  animation: msPowerPop 0.3s ease;
+  font-size: 1.5rem; font-weight: 900; color: #fff;
+  text-shadow: 0 0 12px rgba(255,255,255,0.2);
+  animation: msPowerPop 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 @keyframes msPowerPop {
-  0% { transform: scale(1.4); color: #fbbf24; }
+  0% { transform: scale(1.3); color: var(--ms-accent); }
   100% { transform: scale(1); color: #fff; }
 }
 .ms-score-badge {
-  display: flex; align-items: center; gap: 0.3rem;
-  padding: 0.35rem 0.8rem;
-  background: rgba(251,191,36,0.15);
-  border-radius: 16px; font-weight: 700; font-size: 0.9rem; color: #fbbf24;
+  font-family: 'Orbitron', sans-serif;
+  font-size: 0.8rem; font-weight: 700;
+  color: rgba(255,255,255,0.7);
+  padding: 0.2rem 0;
 }
-.ms-score-star { font-size: 0.9rem; }
 .ms-combo {
   font-family: 'Orbitron', sans-serif;
-  font-size: 0.7rem; font-weight: 700;
-  color: #f472b6; animation: msCombo 0.5s ease;
+  font-size: 0.65rem; font-weight: 700;
+  color: #c084fc;
+  text-shadow: 0 0 10px rgba(192,132,252,0.4);
+  animation: msCombo 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 @keyframes msCombo {
-  0% { transform: scale(1.5); } 100% { transform: scale(1); }
+  0% { transform: scale(1.6); opacity: 0.5; } 100% { transform: scale(1); opacity: 1; }
+}
+.ms-effect-badge {
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 0.6rem; font-weight: 700;
+  padding: 0.15rem 0.5rem;
+  border-radius: 6px; letter-spacing: 1px;
+}
+.ms-eff-shield {
+  color: #38bdf8;
+  background: rgba(56,189,248,0.1);
+  border: 1px solid rgba(56,189,248,0.25);
+  animation: msEffectPulse 1.2s ease-in-out infinite alternate;
+}
+.ms-eff-prime {
+  color: #fbbf24;
+  background: rgba(251,191,36,0.1);
+  border: 1px solid rgba(251,191,36,0.25);
+  animation: msEffectPulse 0.8s ease-in-out infinite alternate;
+}
+@keyframes msEffectPulse {
+  0% { opacity: 0.6; } 100% { opacity: 1; }
 }
 
 /* Weapon bar */
 .ms-weapon-bar {
-  position: absolute; bottom: 0.6rem; left: 50%; transform: translateX(-50%);
-  display: flex; gap: 0.4rem; z-index: 20; pointer-events: auto;
+  position: absolute; bottom: 0.5rem; left: 50%; transform: translateX(-50%);
+  display: flex; gap: 0.35rem; z-index: 20; pointer-events: auto;
+  padding: 0.3rem;
+  background: var(--ms-glass);
+  backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--ms-glass-border);
+  border-radius: 14px;
 }
 .ms-wep-btn {
   display: flex; flex-direction: column; align-items: center;
-  gap: 0.1rem; padding: 0.4rem 0.9rem;
-  background: rgba(255,255,255,0.06);
-  border: 2px solid rgba(255,255,255,0.1);
-  border-radius: 14px; cursor: pointer;
-  transition: all 0.15s ease; position: relative;
-  font-family: 'Nunito', sans-serif;
+  gap: 0.05rem; padding: 0.35rem 0.75rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 10px; cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  position: relative;
+  font-family: 'Exo 2', sans-serif;
+}
+.ms-wep-btn:hover {
+  background: rgba(255,255,255,0.04);
+  border-color: rgba(255,255,255,0.06);
 }
 .ms-wep-btn.active {
-  border-color: var(--wc);
-  background: var(--wg);
-  box-shadow: 0 4px 20px var(--wg);
+  background: color-mix(in srgb, var(--wc) 10%, transparent);
+  border-color: color-mix(in srgb, var(--wc) 30%, transparent);
+  box-shadow: 0 2px 16px color-mix(in srgb, var(--wc) 20%, transparent);
 }
 .ms-wep-sym {
-  font-size: 1.3rem; font-weight: 900; color: var(--wc);
+  font-size: 1.2rem; font-weight: 900; color: var(--wc);
+  transition: transform 0.2s;
 }
+.ms-wep-btn.active .ms-wep-sym { transform: scale(1.15); }
 .ms-wep-name {
-  font-family: 'Orbitron', sans-serif;
-  font-size: 0.55rem; font-weight: 700; color: #94a3b8;
-  letter-spacing: 1px;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 0.5rem; font-weight: 700; color: var(--ms-text-dim);
+  letter-spacing: 1.5px; text-transform: uppercase;
+  transition: color 0.2s;
 }
 .ms-wep-btn.active .ms-wep-name { color: var(--wc); }
 .ms-wep-key {
-  position: absolute; top: -6px; right: -4px;
-  padding: 0.05rem 0.3rem;
-  background: rgba(0,0,0,0.7); border: 1px solid rgba(255,255,255,0.15);
-  border-radius: 4px; font-size: 0.6rem; color: #64748b;
+  position: absolute; top: -5px; right: -3px;
+  padding: 0.05rem 0.25rem;
+  background: var(--ms-bg);
+  border: 1px solid var(--ms-border);
+  border-radius: 4px; font-size: 0.55rem; color: var(--ms-text-dim);
   font-family: 'Orbitron', monospace;
+  transition: all 0.2s;
 }
-.ms-wep-btn.active .ms-wep-key { color: var(--wc); border-color: var(--wc); }
+.ms-wep-btn.active .ms-wep-key {
+  color: var(--wc);
+  border-color: color-mix(in srgb, var(--wc) 40%, transparent);
+}
 
 /* Boss HUD */
 .ms-boss-hud {
   position: absolute; top: 50px; left: 50%; transform: translateX(-50%);
-  display: flex; flex-direction: column; align-items: center; gap: 0.3rem;
+  display: flex; flex-direction: column; align-items: center; gap: 0.35rem;
   z-index: 20; pointer-events: none;
+  padding: 0.4rem 1rem;
+  background: var(--ms-glass);
+  backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(239,68,68,0.15);
+  border-radius: 12px;
+  animation: msBossIn 0.5s cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes msBossIn {
+  0% { opacity: 0; transform: translateX(-50%) translateY(-10px); }
+  100% { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 .ms-boss-label {
-  font-family: 'Orbitron', sans-serif;
-  font-size: 0.7rem; font-weight: 700; color: #ef4444; letter-spacing: 2px;
+  font-family: 'Rajdhani', sans-serif;
+  font-size: 0.7rem; font-weight: 700; color: #ef4444;
+  letter-spacing: 2px; text-transform: uppercase;
 }
+.ms-boss-label strong { color: #fff; }
 .ms-boss-bar-bg {
-  width: 200px; height: 8px; background: rgba(0,0,0,0.6);
-  border-radius: 4px; overflow: hidden;
-  border: 1px solid rgba(255,255,255,0.1);
+  width: 220px; height: 6px;
+  background: rgba(255,255,255,0.06);
+  border-radius: 3px; overflow: hidden;
+  position: relative;
 }
 .ms-boss-bar-fill {
   height: 100%;
-  background: linear-gradient(90deg, #ef4444, #fbbf24);
-  border-radius: 4px; transition: width 0.3s ease;
+  background: linear-gradient(90deg, #ef4444, #f97316);
+  border-radius: 3px; transition: width 0.3s ease;
+  box-shadow: 0 0 8px rgba(239,68,68,0.4);
+}
+.ms-boss-bar-shine {
+  position: absolute; top: 0; left: 0; right: 0; height: 50%;
+  background: linear-gradient(180deg, rgba(255,255,255,0.15), transparent);
+  border-radius: 3px 3px 0 0;
 }
 .ms-boss-match {
-  border: 1px solid rgba(255,215,0,0.4);
-  background: rgba(255,215,0,0.08);
-  border-radius: 12px; padding: 0.3rem 0.8rem;
+  border-color: rgba(255,215,0,0.3);
+  background: rgba(255,215,0,0.05);
 }
 .ms-match-text {
-  color: #ffd700; font-weight: 800;
+  color: #fbbf24; font-weight: 800;
   animation: msMatchPulse 0.6s ease-in-out infinite alternate;
 }
 @keyframes msMatchPulse {
-  0% { opacity: 0.7; transform: scale(1); }
-  100% { opacity: 1; transform: scale(1.05); }
+  0% { opacity: 0.7; } 100% { opacity: 1; }
 }
 .ms-boss-hint {
-  font-size: 0.6rem; color: #94a3b8; margin-top: 0.15rem;
-  font-family: 'Orbitron', sans-serif; letter-spacing: 1px;
+  font-size: 0.58rem; color: var(--ms-text-dim); margin-top: 0.1rem;
+  font-family: 'Rajdhani', sans-serif;
+  font-weight: 500; letter-spacing: 0.5px;
 }
+.ms-boss-hint strong { color: #fff; }
 
 /* Responsive */
 @media (max-width: 500px) {
-  .ms-hud-top { padding: 0.4rem 0.5rem; }
+  .ms-hud-top { padding: 0.3rem 0.4rem; }
   .ms-power-num { font-size: 1.2rem; }
-  .ms-wave-badge { font-size: 0.7rem; padding: 0.25rem 0.6rem; }
-  .ms-score-badge { font-size: 0.75rem; }
-  .ms-wep-btn { padding: 0.3rem 0.6rem; }
-  .ms-wep-sym { font-size: 1rem; }
+  .ms-wave-badge { padding: 0.2rem 0.5rem; }
+  .ms-wave-num { font-size: 0.75rem; }
+  .ms-score-badge { font-size: 0.7rem; }
+  .ms-wep-btn { padding: 0.25rem 0.5rem; }
+  .ms-wep-sym { font-size: 0.95rem; }
+  .ms-weapons-grid { grid-template-columns: 1fr; }
+  .ms-logo-deco { display: none; }
 }
 `;
