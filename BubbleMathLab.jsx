@@ -15,8 +15,10 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 // Physics constants
 const FRICTION = 0.98;
 const BOUNCE = 0.7;
+const BUBBLE_BOUNCE = 0.8; // Bounce coefficient for bubble-to-bubble collisions
 const MERGE_DISTANCE = 65;
-const CAPTURE_DISTANCE = 100; // Much larger capture zone
+const CAPTURE_DISTANCE = 130; // Large capture zone — targets are above the bubble area
+const COLLISION_PADDING = 4; // Extra spacing so bubbles don't visually overlap
 
 // Creature types
 const CREATURES = [
@@ -52,6 +54,7 @@ export default function BubbleMathLab() {
   const lastTimeRef = useRef(0);
   const spawnIntervalRef = useRef(null);
   const targetsRef = useRef(targets); // Ref to access current targets in callbacks
+  const lastTapRef = useRef({ time: 0, bubbleId: null }); // Track double-tap for split
 
   // Keep targets ref updated
   useEffect(() => {
@@ -68,9 +71,20 @@ export default function BubbleMathLab() {
     return { width: 800, height: 600 };
   }, []);
 
-  // Get target Y position (where targets are rendered)
-  const getTargetY = useCallback(() => {
-    return 90; // Fixed Y position for targets
+  // Get target position relative to bubble container by reading the actual DOM
+  const getTargetPosition = useCallback((target) => {
+    if (!containerRef.current) return { x: target.x, y: -50 };
+    const containerRect = containerRef.current.getBoundingClientRect();
+    const el = document.querySelector(`[data-target-id="${target.id}"]`);
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      return {
+        x: rect.x + rect.width / 2 - containerRect.x,
+        y: rect.y + rect.height / 2 - containerRect.y,
+      };
+    }
+    // Fallback
+    return { x: target.x, y: -50 };
   }, []);
 
   const createBubble = useCallback((value, x, y, vx = 0, vy = 0) => {
@@ -90,89 +104,90 @@ export default function BubbleMathLab() {
   // Check if a bubble can capture a target
   const checkBubbleCapture = useCallback((bubble, immediateCapture = false) => {
     if (!bubble) return null;
-    
-    const targetY = getTargetY();
+
     let capturedTarget = null;
-    
+
     targetsRef.current.forEach(target => {
       if (target.captured) return;
       if (bubble.value !== target.targetValue) return;
-      
-      const dx = bubble.x - target.x;
-      const dy = bubble.y - targetY;
+
+      const pos = getTargetPosition(target);
+      const dx = bubble.x - pos.x;
+      const dy = bubble.y - pos.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      
+
       // Large capture zone for better UX
       if (dist < CAPTURE_DISTANCE + bubble.radius) {
         capturedTarget = target;
       }
     });
-    
+
     if (capturedTarget && immediateCapture) {
       // Perform the capture
       performCapture(bubble, capturedTarget);
     }
-    
+
     return capturedTarget;
-  }, [getTargetY]);
+  }, [getTargetPosition]);
 
   // Perform capture action
   const performCapture = useCallback((bubble, target) => {
     // Show capture effect
+    const pos = getTargetPosition(target);
     setCaptureEffect({
       id: Date.now(),
-      x: target.x,
-      y: getTargetY(),
+      x: pos.x,
+      y: pos.y,
       emoji: target.emoji,
       value: bubble.value
     });
     setTimeout(() => setCaptureEffect(null), 1000);
-    
+
     // Update targets
     setTargets(prev => prev.map(t =>
       t.id === target.id ? { ...t, captured: true } : t
     ));
-    
+
     // Remove bubble
     setBubbles(prev => prev.filter(b => b.id !== bubble.id));
-    
+
     // Add score
     setScore(s => s + bubble.value * 10);
-    
+
     // Clear nearby target highlight
     setNearbyTarget(null);
-    
+
     // Progress tutorial
     if (tutorial.show && tutorial.step === 2) {
       setTutorial({ step: 3, show: false });
     }
-  }, [getTargetY, tutorial]);
+  }, [getTargetPosition, tutorial]);
 
   // Find nearby matching target (for visual feedback)
   const findNearbyMatchingTarget = useCallback((bubble) => {
     if (!bubble) return null;
-    
-    const targetY = getTargetY();
+
     let closest = null;
     let closestDist = Infinity;
-    
+
     targetsRef.current.forEach(target => {
       if (target.captured) return;
       if (bubble.value !== target.targetValue) return;
-      
-      const dx = bubble.x - target.x;
-      const dy = bubble.y - targetY;
+
+      const pos = getTargetPosition(target);
+      const dx = bubble.x - pos.x;
+      const dy = bubble.y - pos.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      
+
       // Larger detection zone for highlighting
       if (dist < CAPTURE_DISTANCE * 1.5 + bubble.radius && dist < closestDist) {
         closest = target;
         closestDist = dist;
       }
     });
-    
+
     return closest;
-  }, [getTargetY]);
+  }, [getTargetPosition]);
 
   const initLevel = useCallback((lvl) => {
     const size = getContainerSize();
@@ -184,28 +199,18 @@ export default function BubbleMathLab() {
     setDraggedBubble(null);
     setNearbyTarget(null);
     
-    const baseMax = 5 + Math.floor(lvl * 1.5);
-    const maxBubbleValue = Math.min(baseMax, 15);
-    
-    const numBubbles = Math.min(4 + Math.floor(lvl / 2), 8);
-    const newBubbles = [];
-    
-    for (let i = 0; i < numBubbles; i++) {
-      const value = 1 + Math.floor(Math.random() * maxBubbleValue);
-      newBubbles.push(createBubble(value));
-    }
-    
+    // Generate targets FIRST so we know which values to avoid for bubbles
     const numTargets = Math.min(2 + Math.floor(lvl / 2), 5);
     const newTargets = [];
-    
+
     const minTarget = 5 + Math.floor(lvl * 0.5);
     const maxTarget = Math.min(10 + lvl * 2, 30);
-    
+
     for (let i = 0; i < numTargets; i++) {
       const creature = CREATURES[i % CREATURES.length];
       const targetValue = minTarget + Math.floor(Math.random() * (maxTarget - minTarget + 1));
       const spacing = size.width / (numTargets + 1);
-      
+
       newTargets.push({
         id: getNewId(),
         emoji: creature.emoji,
@@ -215,7 +220,28 @@ export default function BubbleMathLab() {
         captured: false,
       });
     }
-    
+
+    // Collect all target values to avoid when generating bubbles
+    const targetValues = new Set(newTargets.map(t => t.targetValue));
+
+    const baseMax = 5 + Math.floor(lvl * 1.5);
+    const maxBubbleValue = Math.min(baseMax, 15);
+
+    const numBubbles = Math.min(4 + Math.floor(lvl / 2), 8);
+    const newBubbles = [];
+
+    for (let i = 0; i < numBubbles; i++) {
+      let value;
+      let attempts = 0;
+      do {
+        value = 1 + Math.floor(Math.random() * maxBubbleValue);
+        attempts++;
+      } while (targetValues.has(value) && attempts < 50);
+      // If after 50 attempts we can't avoid target values (very unlikely),
+      // fall back to whatever was generated
+      newBubbles.push(createBubble(value));
+    }
+
     setBubbles(newBubbles);
     setTargets(newTargets);
   }, [createBubble, getContainerSize]);
@@ -262,7 +288,8 @@ export default function BubbleMathLab() {
       const size = getContainerSize();
 
       setBubbles(prev => {
-        return prev.map(bubble => {
+        // Step 1: Update positions and apply wall bouncing
+        const updated = prev.map(bubble => {
           if (draggedBubble?.id === bubble.id) return bubble;
 
           let { x, y, vx, vy, radius } = bubble;
@@ -276,7 +303,7 @@ export default function BubbleMathLab() {
           const maxX = size.width - radius;
           const minY = radius + 50; // Keep below target area
           const maxY = size.height - 100 - radius;
-          
+
           if (x < minX) { x = minX; vx = Math.abs(vx) * BOUNCE; }
           if (x > maxX) { x = maxX; vx = -Math.abs(vx) * BOUNCE; }
           if (y < minY) { y = minY; vy = Math.abs(vy) * BOUNCE; }
@@ -287,6 +314,51 @@ export default function BubbleMathLab() {
 
           return { ...bubble, x, y, vx, vy };
         });
+
+        // Step 2: Resolve bubble-to-bubble collisions
+        for (let i = 0; i < updated.length; i++) {
+          for (let j = i + 1; j < updated.length; j++) {
+            const a = updated[i];
+            const b = updated[j];
+
+            // Skip if either bubble is being dragged
+            if (draggedBubble?.id === a.id || draggedBubble?.id === b.id) continue;
+
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const minDist = a.radius + b.radius + COLLISION_PADDING;
+
+            if (dist < minDist && dist > 0.01) {
+              // Normalize collision vector
+              const nx = dx / dist;
+              const ny = dy / dist;
+
+              // Relative velocity along collision normal
+              const dvx = a.vx - b.vx;
+              const dvy = a.vy - b.vy;
+              const relVel = dvx * nx + dvy * ny;
+
+              // Only resolve if bubbles are moving toward each other
+              if (relVel > 0) {
+                const impulse = relVel * BUBBLE_BOUNCE;
+
+                // Apply impulse (equal mass assumed)
+                updated[i] = { ...a, vx: a.vx - impulse * nx, vy: a.vy - impulse * ny };
+                updated[j] = { ...b, vx: b.vx + impulse * nx, vy: b.vy + impulse * ny };
+              }
+
+              // Separate overlapping bubbles
+              const overlap = minDist - dist;
+              const sepX = (overlap / 2) * nx;
+              const sepY = (overlap / 2) * ny;
+              updated[i] = { ...updated[i], x: updated[i].x - sepX, y: updated[i].y - sepY };
+              updated[j] = { ...updated[j], x: updated[j].x + sepX, y: updated[j].y + sepY };
+            }
+          }
+        }
+
+        return updated;
       });
 
       animationRef.current = requestAnimationFrame(updatePhysics);
@@ -324,15 +396,24 @@ export default function BubbleMathLab() {
     return () => clearInterval(interval);
   }, [gameState, draggedBubble, checkBubbleCapture, performCapture]);
 
-  // Handle drag start
+  // Handle drag start (also detects double-tap for split)
   const handleDragStart = (e, bubble) => {
     e.preventDefault();
     e.stopPropagation();
-    
+
+    // Detect double-tap: if same bubble tapped twice within 400ms, split it
+    const now = Date.now();
+    if (lastTapRef.current.bubbleId === bubble.id && now - lastTapRef.current.time < 400) {
+      lastTapRef.current = { time: 0, bubbleId: null };
+      handleSplit(bubble);
+      return;
+    }
+    lastTapRef.current = { time: now, bubbleId: bubble.id };
+
     const rect = containerRef.current.getBoundingClientRect();
     const clientX = e.touches ? e.touches[0].clientX : e.clientX;
     const clientY = e.touches ? e.touches[0].clientY : e.clientY;
-    
+
     setDraggedBubble({
       ...bubble,
       offsetX: clientX - rect.left - bubble.x,
@@ -366,21 +447,12 @@ export default function BubbleMathLab() {
     const nearby = findNearbyMatchingTarget(updatedBubble);
     setNearbyTarget(nearby);
     
-    // Check for immediate capture while dragging
+    // Check for immediate capture while dragging — if within capture zone, just capture
     const captureTarget = checkBubbleCapture(updatedBubble, false);
     if (captureTarget) {
-      // Apply "magnetic" effect - snap closer to target
-      const targetY = getTargetY();
-      const dx = captureTarget.x - newX;
-      const dy = targetY - newY;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-      
-      if (dist < 60) {
-        // Close enough - perform capture!
-        performCapture(updatedBubble, captureTarget);
-        setDraggedBubble(null);
-        return;
-      }
+      performCapture(updatedBubble, captureTarget);
+      setDraggedBubble(null);
+      return;
     }
     
     setBubbles(prev => prev.map(b =>
@@ -388,7 +460,7 @@ export default function BubbleMathLab() {
         ? { ...b, x: newX, y: newY, vx: 0, vy: 0 }
         : b
     ));
-  }, [draggedBubble, findNearbyMatchingTarget, checkBubbleCapture, performCapture, getTargetY]);
+  }, [draggedBubble, findNearbyMatchingTarget, checkBubbleCapture, performCapture]);
 
   // Handle drag end with capture checking
   const handleDragEnd = useCallback(() => {
@@ -470,26 +542,27 @@ export default function BubbleMathLab() {
   // Handle split
   const handleSplit = useCallback((bubble) => {
     if (bubble.value <= 1) return;
-    
-    const half = Math.floor(bubble.value / 2);
-    const other = bubble.value - half;
-    
+
+    // Random split: pick a random value from 1 to (value - 1)
+    const part1 = 1 + Math.floor(Math.random() * (bubble.value - 1));
+    const part2 = bubble.value - part1;
+
     setSplitEffect({
       id: Date.now(),
       x: bubble.x,
       y: bubble.y,
       from: bubble.value,
-      to: [half, other]
+      to: [part1, part2]
     });
     setTimeout(() => setSplitEffect(null), 800);
-    
+
     const offset = 40;
     setBubbles(prev => {
       const filtered = prev.filter(b => b.id !== bubble.id);
       return [
         ...filtered,
-        createBubble(half, bubble.x - offset, bubble.y, -2, (Math.random() - 0.5) * 2),
-        createBubble(other, bubble.x + offset, bubble.y, 2, (Math.random() - 0.5) * 2),
+        createBubble(part1, bubble.x - offset, bubble.y, -2, (Math.random() - 0.5) * 2),
+        createBubble(part2, bubble.x + offset, bubble.y, 2, (Math.random() - 0.5) * 2),
       ];
     });
   }, [createBubble]);
@@ -710,6 +783,7 @@ export default function BubbleMathLab() {
           {targets.map(target => (
             <div
               key={target.id}
+              data-target-id={target.id}
               className={`target ${target.captured ? 'captured' : ''} ${isTargetHighlighted(target) ? 'highlighted' : ''}`}
             >
               <div className="target-glow" />
@@ -735,8 +809,8 @@ export default function BubbleMathLab() {
               <line
                 x1={bubbles.find(b => b.id === draggedBubble.id)?.x || 0}
                 y1={bubbles.find(b => b.id === draggedBubble.id)?.y || 0}
-                x2={nearbyTarget.x}
-                y2={getTargetY()}
+                x2={getTargetPosition(nearbyTarget).x}
+                y2={getTargetPosition(nearbyTarget).y}
                 stroke="url(#lineGradient)"
                 strokeWidth="3"
                 strokeDasharray="8,4"
@@ -873,6 +947,7 @@ const styles = `
   .bubble-lab {
     width: 100%;
     height: 100vh;
+    height: 100dvh;
     font-family: 'Nunito', sans-serif;
     overflow: hidden;
     background: linear-gradient(180deg, #0f172a 0%, #1e293b 50%, #0f172a 100%);
@@ -881,11 +956,12 @@ const styles = `
   /* Intro Screen */
   .intro-screen, .complete-screen {
     height: 100vh;
+    height: 100dvh;
     display: flex;
     align-items: center;
     justify-content: center;
     position: relative;
-    overflow: hidden;
+    overflow: auto;
   }
 
   .intro-bg {
@@ -1131,6 +1207,7 @@ const styles = `
   /* Game Screen */
   .game-screen {
     height: 100vh;
+    height: 100dvh;
     display: flex;
     flex-direction: column;
     position: relative;
@@ -1506,12 +1583,45 @@ const styles = `
 
   /* Responsive */
   @media (max-width: 600px) {
-    .targets-row { gap: 0.6rem; padding: 0.8rem; }
-    .target { padding: 0.5rem 0.8rem; min-width: 70px; }
-    .target-creature { font-size: 1.8rem; }
-    .target-need { font-size: 1.2rem; }
+    .intro-content, .complete-content { padding: 1.2rem; }
+    .instructions-card { padding: 1rem; margin-bottom: 1.2rem; }
+    .tagline { font-size: 1rem; margin-bottom: 1.2rem; }
+    .instruction { margin-bottom: 1rem; }
+    .start-btn, .next-btn { padding: 0.8rem 2rem; font-size: 1.1rem; }
+    .targets-row { gap: 0.5rem; padding: 0.6rem; min-height: 90px; }
+    .target { padding: 0.4rem 0.6rem; min-width: 60px; border-radius: 14px; }
+    .target-creature { font-size: 1.5rem; }
+    .target-need { font-size: 1.1rem; }
+    .target-hitzone { inset: -12px; }
     .bubble-value { font-size: 1.3rem; }
-    .hint-text { flex-direction: column; gap: 0.3rem; }
+    .game-header { padding: 0.5rem 0.8rem; }
+    .level-badge { padding: 0.4rem 0.8rem; font-size: 0.85rem; }
+    .score-badge { padding: 0.4rem 0.8rem; font-size: 0.85rem; }
+    .hint-text { flex-direction: column; gap: 0.3rem; font-size: 0.75rem; }
+    .bottom-bar { padding: 0.5rem; }
     .header-center { display: none; }
+  }
+
+  @media (max-width: 380px) {
+    .logo h1 { font-size: 1.6rem; }
+    .logo-bubble { font-size: 1.8rem; }
+    .tagline { font-size: 0.9rem; }
+    .instructions-card h3 { font-size: 1rem; }
+    .instruction p { font-size: 0.85rem; }
+    .mini-bubble { width: 28px; height: 28px; font-size: 0.85rem; }
+    .mini-bubble.big { width: 34px; height: 34px; font-size: 1rem; }
+    .start-btn, .next-btn { padding: 0.7rem 1.5rem; font-size: 1rem; }
+    .target { min-width: 50px; padding: 0.3rem 0.5rem; }
+    .target-creature { font-size: 1.3rem; }
+    .target-need { font-size: 1rem; }
+  }
+
+  @media (max-height: 600px) {
+    .intro-content, .complete-content { padding: 1rem; }
+    .tagline { margin-bottom: 0.8rem; }
+    .instructions-card { padding: 0.8rem; margin-bottom: 0.8rem; }
+    .instruction { margin-bottom: 0.6rem; }
+    .start-btn, .next-btn { padding: 0.6rem 1.5rem; font-size: 1rem; }
+    .targets-row { min-height: 80px; padding: 0.5rem; }
   }
 `;
